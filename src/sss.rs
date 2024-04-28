@@ -99,11 +99,15 @@ pub fn recover<F: PrimeField>(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
+
+    type F = ark_bls12_381::Fr;
 
     #[test]
     fn test_share_and_recover() {
-        let secret = ark_bls12_381::Fr::from(42u64);
+        let secret = F::from(42u64);
         let threshold = 3;
         let num_shares = 5;
 
@@ -116,4 +120,39 @@ mod tests {
         assert_eq!(secret, recover(vec![shares[0], shares[2], shares[4]].as_slice()));
     }
 
+    // let's check if shares of shares can be recovered
+    #[test]
+    fn test_share_of_shares() {
+        let secret = F::from(42u64);
+        let threshold = 3;
+        let num_parties = 5;
+
+        // this is the first layer of shares
+        let shares: Vec<(F,F)> = share(secret, threshold, num_parties);
+
+
+        // this contains the shares of shares, indexed by the receiver id
+        let mut incoming_shares: HashMap<F, Vec<(F,F)>> = HashMap::new();
+
+        // each shareholder becomes a dealer in the next layer of shares
+        for (dealer_id, share_value) in shares {
+
+            let shares_of_shares = share(share_value, threshold, num_parties);
+
+            for (receiver_id, share_of_share_value) in shares_of_shares {
+                incoming_shares.entry(receiver_id).or_insert(Vec::new()).push((dealer_id, share_of_share_value));
+            }
+        }
+
+        // now we have shares of shares, let's try to get a sharing of the original secret
+        let mut reconstructed_shares: Vec<(F,F)> = Vec::new();
+        for (receiver_id, shares_of_shares) in incoming_shares {
+            let reconstructed_share = recover(&shares_of_shares[..threshold]);
+            reconstructed_shares.push((receiver_id, reconstructed_share));
+        }
+
+        // we should be able to recover the original secret
+        assert_eq!(secret, recover(&reconstructed_shares[..threshold]));
+
+    }
 }
