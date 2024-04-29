@@ -1,10 +1,10 @@
 use rand::{Rng, SeedableRng};
-use ark_ff::PrimeField;
+use ark_ff::Field;
 use ark_poly::{univariate::DensePolynomial, *};
 
 /// computes the Lagrange coefficient for the i-th point amongst the x-coordinates `xs`;
 /// The output coefficient is the result of evaluating the Lagrange polynomial at the point `x`.
-fn lagrange_coefficient<F: PrimeField>(xs: &[F], i: usize, x: F) -> F {
+fn lagrange_coefficient<F: Field>(xs: &[F], i: usize, x: F) -> F {
     // source: https://en.wikipedia.org/wiki/Lagrange_polynomial
 
     // the ith point must be within the range of the x-coordinates
@@ -29,7 +29,7 @@ fn lagrange_coefficient<F: PrimeField>(xs: &[F], i: usize, x: F) -> F {
 }
 
 /// outputs a random polynomial with a fixed point at x = 0
-fn sample_random_polynomial_with_secret<F: PrimeField, R: Rng>(
+fn sample_random_polynomial_with_secret<F: Field, R: Rng>(
     evaluation_at_0: F,
     degree: usize,
     rng: &mut R,
@@ -52,7 +52,7 @@ fn sample_random_polynomial_with_secret<F: PrimeField, R: Rng>(
 /// Note: the threshold t indicates that any t shares can be combined
 /// to recover the secret, and any subset of t-1 shares cannot.
 /// The output shares are (x,y) coordinate pairs.
-pub fn share<F: PrimeField>(
+pub fn share<F: Field>(
     secret: F,
     threshold: usize,
     num_shares: usize
@@ -76,7 +76,7 @@ pub fn share<F: PrimeField>(
 /// where each share is a (x,y) coordinate pair.
 /// Note that this will return a arbitrary value 
 /// if the reconstruction threshold is not met
-pub fn recover<F: PrimeField>(
+pub fn recover<F: Field>(
     shares: &[(F, F)],
 ) -> F {
     let xs = shares.iter().map(|(x, _)| *x).collect::<Vec<F>>();
