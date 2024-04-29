@@ -104,15 +104,13 @@ impl<G> ElGamal<G>
     /// all ciphertexts use the same randomness, which not only saves space,
     /// but also enables efficient NIZK proofs in other parts of the DKG
     pub fn chunked_encrypt_multi_receiver<R: Rng>(
-        pks: &Vec<ElGamalPublicKey<G>>,
-        msg: &ElGamalMessage<G>,
+        pks: &[ElGamalPublicKey<G>],
+        msgs: &[ElGamalMessage<G>],
         rng: &mut R
     ) -> ElGamalChunkedCiphertextMulti<G> {
-        let mut serialized_msg = Vec::new();
-        msg.serialize_compressed(&mut serialized_msg).unwrap();
 
          // l denotes the number of chunks of the serialized message
-        let l = serialized_msg.len();
+        let l = 32;
         let g = G::generator();
 
         // all receivers share the randomness, so let's establish that first
@@ -120,7 +118,10 @@ impl<G> ElGamal<G>
         let c1: Vec<G::Affine> = rs.iter().map(|r_j| g.mul(r_j).into_affine()).collect();
 
         let mut c2: Vec<Vec<G::Affine>> = Vec::new();
-        for (_i, pk_i) in pks.iter().enumerate() {
+        for (i, pk_i) in pks.iter().enumerate() {
+
+            let mut serialized_msg = Vec::new();
+            msgs[i].serialize_compressed(&mut serialized_msg).unwrap();
 
             let mut cs: Vec<G::Affine> = Vec::new();
             for (j, chunk) in serialized_msg.iter().enumerate() {
@@ -199,10 +200,11 @@ mod tests {
         let (sk0, pk0) = ElGamal::<G>::keygen(&mut rng);
         let (sk1, pk1) = ElGamal::<G>::keygen(&mut rng);
 
-        let msg = ElGamalMessage::<G>::rand(&mut rng);
-        let ctxt = ElGamal::<G>::chunked_encrypt_multi_receiver(&vec![pk0, pk1], &msg, &mut rng);
+        let pks = vec![pk0, pk1];
+        let msgs = vec![ElGamalMessage::<G>::rand(&mut rng), ElGamalMessage::<G>::rand(&mut rng)];
+        let ctxt = ElGamal::<G>::chunked_encrypt_multi_receiver(&pks, &msgs, &mut rng);
         
-        assert_eq!(msg, ElGamal::<G>::chunked_decrypt_multi_receiver(0, &sk0, &ctxt));
-        assert_eq!(msg, ElGamal::<G>::chunked_decrypt_multi_receiver(1, &sk1, &ctxt));
+        assert_eq!(msgs[0], ElGamal::<G>::chunked_decrypt_multi_receiver(0, &sk0, &ctxt));
+        assert_eq!(msgs[1], ElGamal::<G>::chunked_decrypt_multi_receiver(1, &sk1, &ctxt));
     }
 }
