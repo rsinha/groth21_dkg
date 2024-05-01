@@ -54,12 +54,11 @@ impl<G> GrothDKG<G>
     ) -> (AddrBook<G>, NetworkState<G>) {
         let n = pre_genesis_addr_book.len();
         let t = n / 2 + 1;
-        println!("setting up with t: {}, n: {}", t, n);
         
         // all node ids as field elements
         let ids = pre_genesis_addr_book.iter().map(|entry| entry.id).collect::<Vec<NodeId<G>>>();
         // all public keys, arranged by the above ids
-        let pks = pre_genesis_addr_book.iter().map(|entry| entry.pk).collect::<Vec<BlsPublicKey<G>>>();
+        let pks = pre_genesis_addr_book.iter().map(|entry| entry.pk).collect::<Vec<ElGamalPublicKey<G>>>();
 
         let mut dkg_messages = Vec::new();
         // let's simulate the work of all dealers
@@ -67,7 +66,7 @@ impl<G> GrothDKG<G>
             // each dealer will choose its own entropy
             let entropy = BlsSecretKey::<G>::rand(rng);
             // ... and will secret-share it with the other nodes
-            let shares = share(entropy, t, n);
+            let shares = share(entropy, t, &ids);
 
             // arrange share values (the y-coordinate) by the node ids above
             let shares_y = ids.iter().map(|id| {
@@ -128,22 +127,14 @@ impl<G> GrothDKG<G>
         elgamal_secret_key: &ElGamalSecretKey<G>,
         messages: &Vec<DKGMessage<G>>
     ) -> BlsSecretKey<G> {
-        // my bls key will be computed based on all the DKG messages I process
-        let mut my_bls_key = BlsSecretKey::<G>::zero();
-
-        // let's simulate the work of a receiver
-        for message in messages.iter() {
-            // each node will decrypt the message
+        messages.iter().fold(BlsSecretKey::<G>::zero(), |acc, message| {
             let share_y = ElGamal::<G>::chunked_decrypt_multi_receiver(
                 receiver_index,
                 &elgamal_secret_key,
                 &message.ctxt,
             );
-
-            my_bls_key += share_y;
-        }
-
-        my_bls_key
+            acc + share_y
+        })
     }
 
     pub fn add_node(
@@ -154,19 +145,45 @@ impl<G> GrothDKG<G>
         let mut next_addr_book = prev_addr_book.clone();
         let mut next_network_state = prev_network_state.clone();
 
+        // let's give this node a brand new id, which is 1 more than the maximum id in the address book
+        let max_existing_id = prev_addr_book
+            .iter()
+            .map(|entry| entry.id)
+            .max()
+            .unwrap_or(NodeId::<G>::zero());
+
+        let node_id = max_existing_id + NodeId::<G>::one();
+
+        // let's give this node a brand new id
         next_addr_book.push(AddrBookEntry {
-            id: NodeId::<G>::from((prev_addr_book.len() + 1) as u64),
+            id: node_id.clone(),
             pk: G::generator().mul(elgamal_secret_key).into_affine(),
             commitment: None,
         });
         
         next_network_state.push(NodeState {
-            id: NodeId::<G>::from((prev_addr_book.len() + 1) as u64),
+            id: node_id.clone(),
             elgamal_secret_key: elgamal_secret_key.clone(),
             bls_secret_key: None,
         });
 
         (next_addr_book, next_network_state)
+    }
+
+    pub fn remove_node(
+        node_id: &NodeId<G>,
+        prev_addr_book: &AddrBook<G>,
+        prev_network_state: &NetworkState<G>,
+    ) -> (AddrBook<G>, NetworkState<G>) {
+        
+        let next_addr_book = prev_addr_book
+            .iter()
+            .filter(|entry| entry.id != *node_id)
+            .cloned()
+            .collect::<AddrBook<G>>();
+
+        // we will preserve the state
+        (next_addr_book, prev_network_state.clone())
     }
 
     pub fn rekey<R: Rng>(
@@ -178,7 +195,6 @@ impl<G> GrothDKG<G>
 
         let next_n = candidate_addr_book.len();
         let next_t = next_n / 2 + 1;
-        println!("rekeying with t: {}, n: {}", next_t, next_n);
         
         // all node ids as field elements
         let next_ids = candidate_addr_book.iter().map(|entry| entry.id).collect::<Vec<NodeId<G>>>();
@@ -186,6 +202,7 @@ impl<G> GrothDKG<G>
         let next_pks = candidate_addr_book.iter().map(|entry| entry.pk).collect::<Vec<BlsPublicKey<G>>>();
 
         let mut dkg_messages = Vec::new();
+
         // let's simulate the work of all dealers
         for dealer_entry in prev_addr_book.iter() {
 
@@ -198,7 +215,7 @@ impl<G> GrothDKG<G>
                 .unwrap();
 
             // ... and will secret-share it with the other nodes
-            let shares = share(bls_secret, next_t, next_n);
+            let shares = share(bls_secret, next_t, &next_ids);
 
             // arrange share values (the y-coordinate) by the node ids above
             let shares_y = next_ids.iter().map(|id| {
@@ -298,7 +315,89 @@ mod tests {
     }
 
     #[test]
-    fn test_dkg() {
+    fn test_dkg_remove() {
+        let rng = &mut test_rng();
+        let n = 5;
+
+        let mut network_state = NetworkState::<G>::new();
+        let mut addr_book = AddrBook::<G>::new();
+
+        for _i in 0..n {
+            let sk = ElGamalSecretKey::<G>::rand(rng);
+            
+            (addr_book, network_state) = GrothDKG::<G>::add_node(
+                &mut addr_book, 
+                &mut network_state, 
+                &sk
+            );
+        }
+
+        let pre_genesis_addr_book = addr_book.clone();
+        let pre_genesis_network_state = network_state.clone();
+
+        let (genesis_addr_book, genesis_network_state) = GrothDKG::<G>::setup(
+            &pre_genesis_addr_book,
+            &pre_genesis_network_state,
+            rng
+        );
+
+        let ledger_id = simulate_bls_secret_recovery(&genesis_network_state);
+        let (mut addr_book, mut network_state) = (genesis_addr_book, genesis_network_state);
+        let mut candidate_addr_book = addr_book.clone();
+
+        // let's do a rekey with the same set of nodes
+        (addr_book, network_state) = GrothDKG::<G>::rekey(
+            &addr_book,
+            &network_state,
+            &candidate_addr_book,
+            rng
+        );
+
+        assert_eq!(ledger_id, simulate_bls_secret_recovery(&network_state));
+
+        // let's remove one new node and rekey
+        (candidate_addr_book, network_state) = GrothDKG::<G>::remove_node(
+            &addr_book[0].id, 
+            &addr_book, 
+            &network_state
+        );
+
+        (addr_book, network_state) = GrothDKG::<G>::rekey(
+            &addr_book,
+            &network_state,
+            &candidate_addr_book,
+            rng
+        );
+
+        assert_eq!(ledger_id, simulate_bls_secret_recovery(&network_state));
+
+        // let's add two nodes and rekey
+        let sk = ElGamalSecretKey::<G>::rand(rng);
+        (candidate_addr_book, network_state) = GrothDKG::<G>::add_node(
+            &addr_book, 
+            &network_state, 
+            &sk
+        );
+
+        let sk = ElGamalSecretKey::<G>::rand(rng);
+        (candidate_addr_book, network_state) = GrothDKG::<G>::add_node(
+            &candidate_addr_book, 
+            &network_state, 
+            &sk
+        );
+
+        (_, network_state) = GrothDKG::<G>::rekey(
+            &addr_book,
+            &network_state,
+            &candidate_addr_book,
+            rng
+        );
+
+        assert_eq!(ledger_id, simulate_bls_secret_recovery(&network_state));
+    }
+
+    #[test]
+    fn test_dkg_add() {
         let rng = &mut test_rng();
         let n = 5;
 
@@ -370,7 +469,7 @@ mod tests {
             &sk
         );
 
-        (addr_book, network_state) = GrothDKG::<G>::rekey(
+        (_, network_state) = GrothDKG::<G>::rekey(
             &addr_book,
             &network_state,
             &candidate_addr_book,

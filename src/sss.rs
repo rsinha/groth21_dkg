@@ -55,8 +55,19 @@ fn sample_random_polynomial_with_secret<F: Field, R: Rng>(
 pub fn share<F: Field>(
     secret: F,
     threshold: usize,
-    num_shares: usize
+    share_ids: &[F],
 ) -> Vec<(F, F)> {
+    // assert that the share_ids are distinct and non-zero
+    assert_eq!(
+        share_ids.iter().collect::<std::collections::HashSet<_>>().len(),
+        share_ids.len(),
+        "share_ids must be distinct"
+    );
+    assert!(
+        !share_ids.contains(&F::zero()),
+        "share_ids must be non-zero"
+    );
+
     // generate random x-coordinates
     let mut rng = rand_chacha::ChaCha8Rng::from_seed([0u8; 32]);
 
@@ -65,7 +76,7 @@ pub fn share<F: Field>(
     );
 
     // we skip over 0 because that's where the secret is embedded
-    let xs = (1..(num_shares + 1)).map(|i| F::from(i as u64)).collect::<Vec<F>>();
+    let xs = share_ids.to_vec();
     let ys = xs.iter().map(|x| p.evaluate(x)).collect::<Vec<F>>();
 
     // output is a vector of (x,y) coordinate pairs
@@ -111,7 +122,8 @@ mod tests {
         let threshold = 3;
         let num_shares = 5;
 
-        let shares = share(secret, threshold, num_shares);
+        let share_ids = (1..=num_shares).map(F::from).collect::<Vec<F>>();
+        let shares = share(secret, threshold, &share_ids[..]);
 
         assert_eq!(secret, recover(&shares[..threshold]));
         assert_eq!(secret, recover(&shares[1..4]));
@@ -128,8 +140,8 @@ mod tests {
         let num_parties = 5;
 
         // this is the first layer of shares
-        let shares: Vec<(F,F)> = share(secret, threshold, num_parties);
-
+        let share_ids = (1..=num_parties).map(F::from).collect::<Vec<F>>();
+        let shares: Vec<(F,F)> = share(secret, threshold, &share_ids);
 
         // this contains the shares of shares, indexed by the receiver id
         let mut incoming_shares: HashMap<F, Vec<(F,F)>> = HashMap::new();
@@ -137,7 +149,7 @@ mod tests {
         // each shareholder becomes a dealer in the next layer of shares
         for (dealer_id, share_value) in shares {
 
-            let shares_of_shares = share(share_value, threshold, num_parties);
+            let shares_of_shares = share(share_value, threshold, &share_ids);
 
             for (receiver_id, share_of_share_value) in shares_of_shares {
                 incoming_shares.entry(receiver_id).or_insert(Vec::new()).push((dealer_id, share_of_share_value));
