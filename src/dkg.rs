@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use rand::Rng;
 
 use ark_ec::*;
@@ -243,7 +242,7 @@ impl<G> GrothDKG<G>
 
             let new_addr_book_entry = AddrBookEntry {
                 id: *receiver_id,
-                pk: prev_addr_book.iter().find(|entry| entry.id == *receiver_id).unwrap().pk,
+                pk: candidate_addr_book.iter().find(|entry| entry.id == *receiver_id).unwrap().pk,
                 commitment: Some(new_bls_public_key),
             };
 
@@ -288,9 +287,13 @@ mod tests {
     type G = ark_bls12_381::G1Projective;
 
     fn simulate_bls_secret_recovery(network_state: &NetworkState<G>) -> BlsSecretKey<G> {
-        let shares: Vec<(NodeId<G>, BlsSecretKey<G>)> = network_state.iter().map(|node_state| {
-            (node_state.id.clone(), node_state.bls_secret_key.unwrap())
-        }).collect();
+
+        let shares: Vec<(NodeId<G>, BlsSecretKey<G>)> = network_state
+            .iter()
+            .filter(|state| state.bls_secret_key.is_some())
+            .map(|node_state| { (node_state.id.clone(), node_state.bls_secret_key.unwrap())})
+            .collect();
+
         sss::recover::<BlsSecretKey<G>>(&shares)
     }
 
@@ -325,6 +328,7 @@ mod tests {
         let (mut addr_book, mut network_state) = (genesis_addr_book, genesis_network_state);
         let mut candidate_addr_book = addr_book.clone();
 
+        // let's do a rekey with the same set of nodes
         (addr_book, network_state) = GrothDKG::<G>::rekey(
             &addr_book,
             &network_state,
@@ -334,20 +338,45 @@ mod tests {
 
         assert_eq!(ledger_id, simulate_bls_secret_recovery(&network_state));
 
-        // let sk = ElGamalSecretKey::<G>::rand(rng);
-        // (candidate_addr_book, network_state) = GrothDKG::<G>::add_node(
-        //     &addr_book, 
-        //     &network_state, 
-        //     &sk
-        // );
+        // let's add one new node and rekey
+        let sk = ElGamalSecretKey::<G>::rand(rng);
+        (candidate_addr_book, network_state) = GrothDKG::<G>::add_node(
+            &addr_book, 
+            &network_state, 
+            &sk
+        );
 
-        // (addr_book, network_state) = GrothDKG::<G>::rekey(
-        //     &addr_book,
-        //     &network_state,
-        //     &candidate_addr_book,
-        //     rng
-        // );
+        (addr_book, network_state) = GrothDKG::<G>::rekey(
+            &addr_book,
+            &network_state,
+            &candidate_addr_book,
+            rng
+        );
 
-        // assert_eq!(ledger_id, simulate_bls_secret_recovery(&network_state));
+        assert_eq!(ledger_id, simulate_bls_secret_recovery(&network_state));
+
+        // let's add two nodes and rekey
+        let sk = ElGamalSecretKey::<G>::rand(rng);
+        (candidate_addr_book, network_state) = GrothDKG::<G>::add_node(
+            &addr_book, 
+            &network_state, 
+            &sk
+        );
+
+        let sk = ElGamalSecretKey::<G>::rand(rng);
+        (candidate_addr_book, network_state) = GrothDKG::<G>::add_node(
+            &candidate_addr_book, 
+            &network_state, 
+            &sk
+        );
+
+        (addr_book, network_state) = GrothDKG::<G>::rekey(
+            &addr_book,
+            &network_state,
+            &candidate_addr_book,
+            rng
+        );
+
+        assert_eq!(ledger_id, simulate_bls_secret_recovery(&network_state));
     }
 }
