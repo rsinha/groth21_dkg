@@ -140,14 +140,14 @@ impl<G> ElGamal<G>
 
     /// decrypts a chunked ElGamal multi-ciphertext using the input decryption key
     pub fn chunked_decrypt_multi_receiver(
-        receiver_id: u64,
-        sk: &ElGamalSecretKey<G>,
-        c: &ElGamalChunkedCiphertextMulti<G>,
+        receiver_index: u64, // which location in the ciphertext to decrypt
+        sk: &ElGamalSecretKey<G>, // the decryption key
+        c: &ElGamalChunkedCiphertextMulti<G>, // the multi-receiver ciphertext
     ) -> ElGamalMessage<G> {
         let g = G::generator();
         let mut msg = G::ScalarField::zero();
 
-        for (j, c_j) in c.c2[receiver_id as usize].iter().enumerate() {
+        for (j, c_j) in c.c2[receiver_index as usize].iter().enumerate() {
             let anti_mask_j = c.c1[j].mul(G::ScalarField::zero() - sk); // g^(-r_j  * sk)
             let m_j_commitment = c_j.add(anti_mask_j); // M_j = c2_j * g^(-r_j * sk) = g ^ m_j
             let m_j = ElGamal::<G>::brute_force_decrypt(&g, &m_j_commitment).unwrap();
