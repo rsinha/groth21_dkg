@@ -85,6 +85,7 @@ impl<G> GrothDKG<G>
         // let's compute the output address book and network state
         let mut genesis_network_state = NetworkState::<G>::new();
         let mut genesis_addr_book = AddrBook::<G>::new();
+        let cache = ElGamal::<G>::generate_cache();
 
         for (receiver_index, receiver_id) in ids.iter().enumerate() {
             // find receiver state in the network state data structure
@@ -96,7 +97,8 @@ impl<G> GrothDKG<G>
             let new_bls_secret_key = Self::process_setup_messages(
                 receiver_index as u64,
                 &receiver_state.elgamal_secret_key,
-                &dkg_messages
+                &dkg_messages,
+                &cache
             );
             
             //TODO: need to derive this from the commitments in the DKG messages
@@ -125,13 +127,15 @@ impl<G> GrothDKG<G>
     fn process_setup_messages(
         receiver_index: u64,
         elgamal_secret_key: &ElGamalSecretKey<G>,
-        messages: &Vec<DKGMessage<G>>
+        messages: &Vec<DKGMessage<G>>,
+        cache: &ElGamalCache<G>
     ) -> BlsSecretKey<G> {
         messages.iter().fold(BlsSecretKey::<G>::zero(), |acc, message| {
             let share_y = ElGamal::<G>::chunked_decrypt_multi_receiver(
                 receiver_index,
                 &elgamal_secret_key,
                 &message.ctxt,
+                cache
             );
             acc + share_y
         })
@@ -231,9 +235,17 @@ impl<G> GrothDKG<G>
             );
         }
 
+        let ctxt_size_by_each_node = 
+            dkg_messages[0].ctxt.c1.len() + 
+            dkg_messages[0].ctxt.c2.len() * dkg_messages[0].ctxt.c2[0].len();
+        let each_node_output =  ((ctxt_size_by_each_node * 48) as f64) / ((1024 * 1024) as f64);
+        println!("communication requirement per node: {} MB", each_node_output);
+        println!("communication requirement total: {} MB", each_node_output * next_n as f64);
+
         // let's compute the output address book and network state
         let mut next_network_state = NetworkState::<G>::new();
         let mut next_addr_book = AddrBook::<G>::new();
+        let cache = ElGamal::<G>::generate_cache();
 
         for (receiver_index, receiver_id) in next_ids.iter().enumerate() {
             // find receiver state in the network state data structure
@@ -242,11 +254,14 @@ impl<G> GrothDKG<G>
                 .find(|state_entry| state_entry.id == *receiver_id)
                 .unwrap();
 
+            let rekey_compute_time = std::time::Instant::now();
             let new_bls_secret_key = Self::process_rekey_messages(
                 receiver_index as u64,
                 &receiver_state.elgamal_secret_key,
-                &dkg_messages
+                &dkg_messages,
+                &cache
             );
+            println!("computation requirement per node: {:?}", rekey_compute_time.elapsed());
             
             //TODO: need to derive this from the commitments in the DKG messages
             let new_bls_public_key = G::generator().mul(new_bls_secret_key).into_affine();
@@ -275,7 +290,8 @@ impl<G> GrothDKG<G>
     fn process_rekey_messages(
         receiver_index: u64,
         elgamal_secret_key: &ElGamalSecretKey<G>,
-        dkg_messages: &Vec<DKGMessage<G>>
+        dkg_messages: &Vec<DKGMessage<G>>,
+        cache: &ElGamalCache<G>,
     ) -> BlsSecretKey<G> {
         let mut incoming_shares: Vec<(NodeId<G>, ElGamalSecretKey<G>)> = Vec::new();
 
@@ -285,6 +301,7 @@ impl<G> GrothDKG<G>
                 receiver_index,
                 elgamal_secret_key,
                 &dkg_message.ctxt,
+                cache
             );
 
             incoming_shares.push((dkg_message.dealer_id.clone(), share_y));
@@ -312,6 +329,47 @@ mod tests {
             .collect();
 
         sss::recover::<BlsSecretKey<G>>(&shares)
+    }
+
+    #[test]
+    fn test_dkg_large() {
+        let rng = &mut test_rng();
+        let n = 50;
+
+        let mut network_state = NetworkState::<G>::new();
+        let mut addr_book = AddrBook::<G>::new();
+
+        for _i in 0..n {
+            let sk = ElGamalSecretKey::<G>::rand(rng);
+            
+            (addr_book, network_state) = GrothDKG::<G>::add_node(
+                &mut addr_book, 
+                &mut network_state, 
+                &sk
+            );
+        }
+
+        let pre_genesis_addr_book = addr_book.clone();
+        let pre_genesis_network_state = network_state.clone();
+
+        let (genesis_addr_book, genesis_network_state) = GrothDKG::<G>::setup(
+            &pre_genesis_addr_book,
+            &pre_genesis_network_state,
+            rng
+        );
+
+        let ledger_id = simulate_bls_secret_recovery(&genesis_network_state);
+
+        let candidate_addr_book = addr_book.clone();
+        // let's do a rekey with the same set of nodes
+        (_, network_state) = GrothDKG::<G>::rekey(
+            &genesis_addr_book,
+            &genesis_network_state,
+            &candidate_addr_book,
+            rng
+        );
+
+        assert_eq!(ledger_id, simulate_bls_secret_recovery(&network_state));
     }
 
     #[test]

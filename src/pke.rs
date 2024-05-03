@@ -5,6 +5,7 @@ use ark_std::ops::*;
 use ark_serialize::*;
 
 use rand::Rng;
+use std::collections::HashMap;
 
 pub struct ElGamal<G: CurveGroup> {
     _engine: PhantomData<G>,
@@ -26,6 +27,7 @@ pub struct ElGamalChunkedCiphertextMulti<G: CurveGroup> {
     pub c2: Vec<Vec<G::Affine>>,
 }
 
+pub type ElGamalCache<G> = HashMap<<G as CurveGroup>::Affine, ElGamalMessage<G>>;
 pub type ElGamalPublicKey<G> = <G as CurveGroup>::Affine;
 pub type ElGamalSecretKey<G> = <<G as CurveGroup>::Config as CurveConfig>::ScalarField;
 pub type ElGamalMessage<G> = <<G as CurveGroup>::Config as CurveConfig>::ScalarField;
@@ -33,6 +35,16 @@ pub type ElGamalMessage<G> = <<G as CurveGroup>::Config as CurveConfig>::ScalarF
 impl<G> ElGamal<G>
     where G: CurveGroup
 {
+    pub fn generate_cache() -> ElGamalCache<G> {
+        (0..256)
+            .map(|i| {
+                let x = G::ScalarField::from(i as u64);
+                let candidate = G::generator().mul(&x).into_affine();
+                (candidate, G::ScalarField::from(i as u64))
+            })
+            .collect::<HashMap<G::Affine, G::ScalarField>>()
+    }
+
     /// generates a keypair for the ElGamal cryptosystem
     pub fn keygen<R: Rng>(rng: &mut R) -> (ElGamalSecretKey<G>, ElGamalPublicKey<G>) {
         let sk = G::ScalarField::rand(rng);
@@ -84,16 +96,15 @@ impl<G> ElGamal<G>
     /// currently returns an unrecoverable error, if decryption fails (TODO: error handling)
     pub fn chunked_decrypt(
         sk: &ElGamalSecretKey<G>,
-        c: &ElGamalChunkedCiphertext<G>
+        c: &ElGamalChunkedCiphertext<G>,
+        cache: &ElGamalCache<G>
     ) -> ElGamalMessage<G> {
-        let generator = G::generator();
-
         let mut msg = G::ScalarField::zero();
 
         for (j, c_j) in c.cs.iter().enumerate() {
             let anti_mask_j = c_j.c1.mul(G::ScalarField::zero() - sk); // g^(-r_j  * sk)
             let m_j_commitment = c_j.c2.add(anti_mask_j); // M_j = c2_j * g^(-r_j * sk) = g ^ m_j
-            let m_j = ElGamal::<G>::brute_force_decrypt(&generator, &m_j_commitment).unwrap();
+            let m_j = ElGamal::<G>::brute_force_decrypt(&m_j_commitment, &cache).unwrap();
             msg += G::ScalarField::from(256u64).pow([j as u64]) * m_j;
         }
 
@@ -143,14 +154,14 @@ impl<G> ElGamal<G>
         receiver_index: u64, // which location in the ciphertext to decrypt
         sk: &ElGamalSecretKey<G>, // the decryption key
         c: &ElGamalChunkedCiphertextMulti<G>, // the multi-receiver ciphertext
+        cache: &ElGamalCache<G> // the cache for the brute force decryption
     ) -> ElGamalMessage<G> {
-        let g = G::generator();
         let mut msg = G::ScalarField::zero();
 
         for (j, c_j) in c.c2[receiver_index as usize].iter().enumerate() {
             let anti_mask_j = c.c1[j].mul(G::ScalarField::zero() - sk); // g^(-r_j  * sk)
             let m_j_commitment = c_j.add(anti_mask_j); // M_j = c2_j * g^(-r_j * sk) = g ^ m_j
-            let m_j = ElGamal::<G>::brute_force_decrypt(&g, &m_j_commitment).unwrap();
+            let m_j = ElGamal::<G>::brute_force_decrypt(&m_j_commitment, cache).unwrap();
             msg += G::ScalarField::from(256u64).pow([j as u64]) * m_j;
         }
 
@@ -161,17 +172,13 @@ impl<G> ElGamal<G>
     /// this method tries all possible messages and returns 
     /// the one that matches the commitment
     fn brute_force_decrypt(
-        base: &G,
-        commitment: &G
+        commitment: &G,
+        cache: &ElGamalCache<G>
     ) -> Option<ElGamalMessage<G>> {
-        for i in 0..256 {
-            let candidate = base.mul(&G::ScalarField::from(i as u64));
-            if candidate.into_affine() == commitment.into_affine() {
-                return Some(G::ScalarField::from(i as u64));
-            }
+        match cache.get(&commitment.into_affine()) {
+            Some(msg) => Some(*msg),
+            None => None
         }
-
-        None
     }
 }
 
@@ -184,18 +191,21 @@ mod tests {
     #[test]
     fn test_chunked_encrypt() {
         let mut rng = rand::thread_rng();
+        let cache = ElGamal::<G>::generate_cache();
 
         let (sk, pk) = ElGamal::<G>::keygen(&mut rng);
 
         let msg = ElGamalMessage::<G>::rand(&mut rng);
         let ctxt = ElGamal::<G>::chunked_encrypt(&pk, &msg, &mut rng);
         
-        assert_eq!(msg, ElGamal::<G>::chunked_decrypt(&sk, &ctxt));
+        assert_eq!(msg, ElGamal::<G>::chunked_decrypt(&sk, &ctxt, &cache));
     }
 
     #[test]
     fn test_chunked_encrypt_multi_receiver() {
         let mut rng = rand::thread_rng();
+
+        let cache = ElGamal::<G>::generate_cache();
 
         let (sk0, pk0) = ElGamal::<G>::keygen(&mut rng);
         let (sk1, pk1) = ElGamal::<G>::keygen(&mut rng);
@@ -204,7 +214,7 @@ mod tests {
         let msgs = vec![ElGamalMessage::<G>::rand(&mut rng), ElGamalMessage::<G>::rand(&mut rng)];
         let ctxt = ElGamal::<G>::chunked_encrypt_multi_receiver(&pks, &msgs, &mut rng);
         
-        assert_eq!(msgs[0], ElGamal::<G>::chunked_decrypt_multi_receiver(0, &sk0, &ctxt));
-        assert_eq!(msgs[1], ElGamal::<G>::chunked_decrypt_multi_receiver(1, &sk1, &ctxt));
+        assert_eq!(msgs[0], ElGamal::<G>::chunked_decrypt_multi_receiver(0, &sk0, &ctxt, &cache));
+        assert_eq!(msgs[1], ElGamal::<G>::chunked_decrypt_multi_receiver(1, &sk1, &ctxt, &cache));
     }
 }
