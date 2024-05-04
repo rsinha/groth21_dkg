@@ -8,6 +8,7 @@ type ScalarField<G> = <<G as CurveGroup>::Config as CurveConfig>::ScalarField;
 
 #[allow(non_snake_case)]
 pub struct Statement<G: CurveGroup> {
+    pub ids: Vec<ScalarField<G>>, // unique ids for the nodes receiving the shares
     pub public_keys: Vec<G::Affine>, // n public keys // (y1,...,yn) in the paper
     pub polynomial_commitment: Vec<G::Affine>, // t group elements // (A_0, ..., A_t-1) in the paper
     pub ciphertext_values: Vec<G::Affine>, // n ciphertexts // C1,...,Cn in the paper
@@ -61,9 +62,9 @@ pub fn prove<G: CurveGroup, R: Rng>(
     // compute Y = Π_{i=1}^{n} (y_i)^x^i
     let inner = statement.public_keys
         .iter()
-        .enumerate()
-        .fold(G::Affine::zero(), |acc, (i, y_i)| {
-        acc.add(y_i.mul(&x.pow([i as u64 + 1])).into_affine()).into_affine()
+        .zip(statement.ids.iter())
+        .fold(G::Affine::zero(), |acc, (y_i, &id_i)| {
+        acc.add(y_i.mul(&x.pow(id_i.into_bigint())).into_affine()).into_affine()
     });
     let Y = inner.mul(rho).add(A).into_affine();
 
@@ -76,9 +77,9 @@ pub fn prove<G: CurveGroup, R: Rng>(
     // compute z_a = x' * Sigma_{i=1}^{n} (s_i)*x^i + alpha
     let z_a = alpha + x_prime * witness.share_values
         .iter()
-        .enumerate()
-        .fold(ScalarField::<G>::zero(), |acc, (i, &s_i)| {
-            acc + s_i * x.pow([i as u64 + 1])
+        .zip(statement.ids.iter())
+        .fold(ScalarField::<G>::zero(), |acc, (&s_i, &id_i)| {
+            acc + s_i * x.pow(id_i.into_bigint())
         });
 
     Proof { F, A, Y, z_r, z_a }
@@ -89,7 +90,6 @@ pub fn verify<G: CurveGroup>(
     statement: &Statement<G>,
     proof: &Proof<G>
 ) -> bool {
-    let n = statement.public_keys.len();
     // compute x := RO(instance)
     let x = ScalarField::<G>::from(42u64); // obviously TODO
     // compute x' := RO(x, F, A, Y)
@@ -107,9 +107,10 @@ pub fn verify<G: CurveGroup>(
         .fold(G::Affine::zero(), |acc, (k, A_k)| {
             acc.add(
                 A_k.mul(
-                    (1..=n)
-                    .fold(ScalarField::<G>::zero(), |acc, i| {
-                        acc + ScalarField::<G>::from(i as u64).pow([k as u64]) * x.pow([i as u64])
+                    statement.ids
+                    .iter()
+                    .fold(ScalarField::<G>::zero(), |acc, id_i| {
+                        acc + id_i.pow([k as u64]) * x.pow(id_i.into_bigint())
                     })
                 ).into_affine()
             ).into_affine()
@@ -120,16 +121,16 @@ pub fn verify<G: CurveGroup>(
 
     let inner = statement.ciphertext_values
         .iter()
-        .enumerate()
-        .fold(G::Affine::zero(), |acc, (i, C_i)| {
-            acc.add(C_i.mul(x.pow([i as u64 + 1])).into_affine()).into_affine()
+        .zip(statement.ids.iter())
+        .fold(G::Affine::zero(), |acc, (C_i, id_i)| {
+            acc.add(C_i.mul(x.pow(id_i.into_bigint())).into_affine()).into_affine()
         });
     let lhs = inner.mul(&x_prime).add(&proof.Y).into_affine();
     let inner = statement.public_keys
         .iter()
-        .enumerate()
-        .fold(G::Affine::zero(), |acc, (i, y_i)| {
-            acc.add(y_i.mul(proof.z_r * x.pow([i as u64 + 1])).into_affine()).into_affine()
+        .zip(statement.ids.iter())
+        .fold(G::Affine::zero(), |acc, (y_i, id_i)| {
+            acc.add(y_i.mul(proof.z_r * x.pow(id_i.into_bigint())).into_affine()).into_affine()
         });
     let rhs = inner.add(G::generator().mul(proof.z_a)).into_affine();
     if lhs != rhs { return false; }

@@ -93,6 +93,7 @@ impl<G> GrothDKG<G>
             let poly_commitment = nizk::feldman_commitment::<G>(&poly);
 
             let statement: nizk::Statement<G> = nizk::Statement {
+                ids: ids.clone(),
                 public_keys: pks.clone(),
                 polynomial_commitment: poly_commitment.clone(),
                 ciphertext_values: combined_ctxt.c2,
@@ -132,6 +133,7 @@ impl<G> GrothDKG<G>
                 &receiver_state.elgamal_secret_key,
                 &dkg_messages,
                 &pks,
+                &ids,
                 &cache
             );
             
@@ -163,12 +165,14 @@ impl<G> GrothDKG<G>
         elgamal_secret_key: &ElGamalSecretKey<G>,
         messages: &Vec<DKGMessage<G>>,
         pks: &Vec<ElGamalPublicKey<G>>,
+        ids: &Vec<NodeId<G>>,
         cache: &ElGamalCache<G>
     ) -> BlsSecretKey<G> {
         //let's verify the messages first
         for message in messages.iter() {
             let combined_ctxt = ElGamal::<G>::combine_chunked_ciphertext(&message.ctxt);
             let statement: nizk::Statement<G> = nizk::Statement {
+                ids: ids.clone(),
                 public_keys: pks.clone(),
                 polynomial_commitment: message.commitment.clone(),
                 ciphertext_values: combined_ctxt.c2,
@@ -292,6 +296,7 @@ impl<G> GrothDKG<G>
             let poly_commitment = nizk::feldman_commitment::<G>(&poly);
 
             let statement: nizk::Statement<G> = nizk::Statement {
+                ids: next_ids.clone(),
                 public_keys: next_pks.clone(),
                 polynomial_commitment: poly_commitment.clone(),
                 ciphertext_values: combined_ctxt.c2,
@@ -340,6 +345,7 @@ impl<G> GrothDKG<G>
                 &receiver_state.elgamal_secret_key,
                 &dkg_messages,
                 &next_pks,
+                &next_ids,
                 &cache
             );
             println!("computation requirement per node: {:?}", rekey_compute_time.elapsed());
@@ -373,6 +379,7 @@ impl<G> GrothDKG<G>
         elgamal_secret_key: &ElGamalSecretKey<G>,
         dkg_messages: &Vec<DKGMessage<G>>,
         pks: &Vec<ElGamalPublicKey<G>>,
+        ids: &Vec<NodeId<G>>,
         cache: &ElGamalCache<G>,
     ) -> BlsSecretKey<G> {
 
@@ -380,6 +387,7 @@ impl<G> GrothDKG<G>
         for message in dkg_messages.iter() {
             let combined_ctxt = ElGamal::<G>::combine_chunked_ciphertext(&message.ctxt);
             let statement: nizk::Statement<G> = nizk::Statement {
+                ids: ids.clone(),
                 public_keys: pks.clone(),
                 polynomial_commitment: message.commitment.clone(),
                 ciphertext_values: combined_ctxt.c2,
