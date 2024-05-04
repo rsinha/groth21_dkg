@@ -120,18 +120,14 @@ impl<G> ElGamal<G>
     /// encrypts a message for multiple receivers using the input public keys;
     /// all ciphertexts use the same randomness, which not only saves space,
     /// but also enables efficient NIZK proofs in other parts of the DKG
-    pub fn chunked_encrypt_multi_receiver<R: Rng>(
+    pub fn chunked_encrypt_multi_receiver(
         pks: &[ElGamalPublicKey<G>],
         msgs: &[ElGamalMessage<G>],
-        rng: &mut R
+        rs: &[G::ScalarField]
     ) -> ElGamalChunkedCiphertextMulti<G> {
 
-         // l denotes the number of chunks of the serialized message
-        let l = 32;
         let g = G::generator();
 
-        // all receivers share the randomness, so let's establish that first
-        let rs = (0..l).map(|_| G::ScalarField::rand(rng)).collect::<Vec<G::ScalarField>>();
         let c1: Vec<G::Affine> = rs.iter().map(|r_j| g.mul(r_j).into_affine()).collect();
 
         let mut c2: Vec<Vec<G::Affine>> = Vec::new();
@@ -244,7 +240,9 @@ mod tests {
 
         let pks = vec![pk0, pk1];
         let msgs = vec![ElGamalMessage::<G>::rand(&mut rng), ElGamalMessage::<G>::rand(&mut rng)];
-        let ctxt = ElGamal::<G>::chunked_encrypt_multi_receiver(&pks, &msgs, &mut rng);
+        // all receivers share the randomness, so let's establish that first
+        let rs = (0..32).map(|_| ElGamalSecretKey::<G>::rand(&mut rng)).collect::<Vec<_>>();
+        let ctxt = ElGamal::<G>::chunked_encrypt_multi_receiver(&pks, &msgs, &rs[..32]);
         
         assert_eq!(msgs[0], ElGamal::<G>::chunked_decrypt_multi_receiver(0, &sk0, &ctxt, &cache));
         assert_eq!(msgs[1], ElGamal::<G>::chunked_decrypt_multi_receiver(1, &sk1, &ctxt, &cache));

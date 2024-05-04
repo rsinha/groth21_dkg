@@ -29,8 +29,8 @@ pub struct Proof<G: CurveGroup> {
     pub z_a: ScalarField<G>, // z_a in the paper
 }
 
-fn feldman_commitment<G: CurveGroup>(
-    polynomial: DensePolynomial<ScalarField<G>>
+pub fn feldman_commitment<G: CurveGroup>(
+    polynomial: &DensePolynomial<ScalarField<G>>
 ) -> Vec<G::Affine> {
     let generator = G::generator();
 
@@ -41,7 +41,7 @@ fn feldman_commitment<G: CurveGroup>(
 }
 
 #[allow(non_snake_case)]
-fn prove<G: CurveGroup, R: Rng>(
+pub fn prove<G: CurveGroup, R: Rng>(
     witness: &Witness<G>,
     statement: &Statement<G>,
     rng: &mut R

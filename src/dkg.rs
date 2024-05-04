@@ -4,13 +4,17 @@ use ark_ec::*;
 use ark_ff::*;
 use ark_std::marker::PhantomData;
 
+use crate::nizk;
 use crate::pke::*;
 use crate::sss::*;
+use crate::nizk::*;
 
 /// message sent by a node during the setup or rekey protocol
 pub struct DKGMessage<G: CurveGroup> {
     pub dealer_id: NodeId<G>,
     pub ctxt: ElGamalChunkedCiphertextMulti<G>,
+    pub commitment: Vec<G::Affine>,
+    pub proof: Proof<G>,
 }
 
 /// the id this node will use for identifying shares
@@ -66,18 +70,47 @@ impl<G> GrothDKG<G>
             // each dealer will choose its own entropy
             let entropy = BlsSecretKey::<G>::rand(rng);
             // ... and will secret-share it with the other nodes
-            let shares = share(entropy, t, &ids).0;
+            let (shares, poly) = share(entropy, t, &ids);
 
             // arrange share values (the y-coordinate) by the node ids above
             let shares_y = ids.iter().map(|id| {
                 shares.iter().find(|share| share.0 == *id).unwrap().1
             }).collect::<Vec<_>>();
 
+            // all receivers share the randomness, so let's establish that first
+            let rs = (0..32).map(|_| G::ScalarField::rand(rng)).collect::<Vec<G::ScalarField>>();
+
+            let ctxt = ElGamal::<G>::chunked_encrypt_multi_receiver(&pks, &shares_y, &rs);
+
+            let combined_ctxt = ElGamal::<G>::combine_chunked_ciphertext(&ctxt);
+            let combined_rand = rs
+                .iter()
+                .enumerate()
+                .fold(
+                    G::ScalarField::zero(),
+                    |acc, (i, &r)| acc + r * G::ScalarField::from(256u64).pow([i as u64])
+                );
+            let poly_commitment = nizk::feldman_commitment::<G>(&poly);
+
+            let statement: nizk::Statement<G> = nizk::Statement {
+                public_keys: pks.clone(),
+                polynomial_commitment: poly_commitment.clone(),
+                ciphertext_values: combined_ctxt.c2,
+                ciphertext_rand: combined_ctxt.c1,
+            };
+
+            let witness: nizk::Witness<G> = nizk::Witness {
+                rand: combined_rand,
+                share_values: shares_y.clone(),
+            };
+
             // let's create the DKG message that encrypts all shares under the node ids above
             dkg_messages.push(
                 DKGMessage {
-                    ctxt: ElGamal::<G>::chunked_encrypt_multi_receiver(&pks, &shares_y, rng),
+                    ctxt: ctxt,
                     dealer_id: dealer_entry.id.clone(),
+                    proof: prove(&witness, &statement, rng),
+                    commitment: poly_commitment.clone(),
                 }
             );
         }
@@ -98,6 +131,7 @@ impl<G> GrothDKG<G>
                 receiver_index as u64,
                 &receiver_state.elgamal_secret_key,
                 &dkg_messages,
+                &pks,
                 &cache
             );
             
@@ -128,8 +162,24 @@ impl<G> GrothDKG<G>
         receiver_index: u64,
         elgamal_secret_key: &ElGamalSecretKey<G>,
         messages: &Vec<DKGMessage<G>>,
+        pks: &Vec<ElGamalPublicKey<G>>,
         cache: &ElGamalCache<G>
     ) -> BlsSecretKey<G> {
+        //let's verify the messages first
+        for message in messages.iter() {
+            let combined_ctxt = ElGamal::<G>::combine_chunked_ciphertext(&message.ctxt);
+            let statement: nizk::Statement<G> = nizk::Statement {
+                public_keys: pks.clone(),
+                polynomial_commitment: message.commitment.clone(),
+                ciphertext_values: combined_ctxt.c2,
+                ciphertext_rand: combined_ctxt.c1,
+            };
+
+            // for genesis, let's expect all parties to behave correctly
+            // that said, this can be modified to just include the correct parties
+            assert!(verify(&statement, &message.proof));
+        }
+
         messages.iter().fold(BlsSecretKey::<G>::zero(), |acc, message| {
             let share_y = ElGamal::<G>::chunked_decrypt_multi_receiver(
                 receiver_index,
@@ -203,7 +253,7 @@ impl<G> GrothDKG<G>
         // all node ids as field elements
         let next_ids = candidate_addr_book.iter().map(|entry| entry.id).collect::<Vec<NodeId<G>>>();
         // all public keys, arranged by the above ids
-        let next_pks = candidate_addr_book.iter().map(|entry| entry.pk).collect::<Vec<BlsPublicKey<G>>>();
+        let next_pks = candidate_addr_book.iter().map(|entry| entry.pk).collect::<Vec<ElGamalPublicKey<G>>>();
 
         let mut dkg_messages = Vec::new();
 
@@ -219,18 +269,47 @@ impl<G> GrothDKG<G>
                 .unwrap();
 
             // ... and will secret-share it with the other nodes
-            let shares = share(bls_secret, next_t, &next_ids).0;
+            let (shares, poly) = share(bls_secret, next_t, &next_ids);
 
             // arrange share values (the y-coordinate) by the node ids above
             let shares_y = next_ids.iter().map(|id| {
                 shares.iter().find(|share| share.0 == *id).unwrap().1
             }).collect::<Vec<_>>();
 
+            // all receivers share the randomness, so let's establish that first
+            let rs = (0..32).map(|_| G::ScalarField::rand(rng)).collect::<Vec<G::ScalarField>>();
+
+            let ctxt = ElGamal::<G>::chunked_encrypt_multi_receiver(&next_pks, &shares_y, &rs);
+
+            let combined_ctxt = ElGamal::<G>::combine_chunked_ciphertext(&ctxt);
+            let combined_rand = rs
+                .iter()
+                .enumerate()
+                .fold(
+                    G::ScalarField::zero(),
+                    |acc, (i, &r)| acc + r * G::ScalarField::from(256u64).pow([i as u64])
+                );
+            let poly_commitment = nizk::feldman_commitment::<G>(&poly);
+
+            let statement: nizk::Statement<G> = nizk::Statement {
+                public_keys: next_pks.clone(),
+                polynomial_commitment: poly_commitment.clone(),
+                ciphertext_values: combined_ctxt.c2,
+                ciphertext_rand: combined_ctxt.c1,
+            };
+
+            let witness: nizk::Witness<G> = nizk::Witness {
+                rand: combined_rand,
+                share_values: shares_y.clone(),
+            };
+
             // let's create the DKG message that encrypts all shares under the node ids above
             dkg_messages.push(
                 DKGMessage {
-                    ctxt: ElGamal::<G>::chunked_encrypt_multi_receiver(&next_pks, &shares_y, rng),
+                    ctxt: ctxt,
                     dealer_id: dealer_entry.id.clone(),
+                    proof: prove(&witness, &statement, rng),
+                    commitment: poly_commitment.clone(),
                 }
             );
         }
@@ -245,6 +324,7 @@ impl<G> GrothDKG<G>
         // let's compute the output address book and network state
         let mut next_network_state = NetworkState::<G>::new();
         let mut next_addr_book = AddrBook::<G>::new();
+
         let cache = ElGamal::<G>::generate_cache();
 
         for (receiver_index, receiver_id) in next_ids.iter().enumerate() {
@@ -259,6 +339,7 @@ impl<G> GrothDKG<G>
                 receiver_index as u64,
                 &receiver_state.elgamal_secret_key,
                 &dkg_messages,
+                &next_pks,
                 &cache
             );
             println!("computation requirement per node: {:?}", rekey_compute_time.elapsed());
@@ -291,8 +372,25 @@ impl<G> GrothDKG<G>
         receiver_index: u64,
         elgamal_secret_key: &ElGamalSecretKey<G>,
         dkg_messages: &Vec<DKGMessage<G>>,
+        pks: &Vec<ElGamalPublicKey<G>>,
         cache: &ElGamalCache<G>,
     ) -> BlsSecretKey<G> {
+
+        //let's verify the messages first
+        for message in dkg_messages.iter() {
+            let combined_ctxt = ElGamal::<G>::combine_chunked_ciphertext(&message.ctxt);
+            let statement: nizk::Statement<G> = nizk::Statement {
+                public_keys: pks.clone(),
+                polynomial_commitment: message.commitment.clone(),
+                ciphertext_values: combined_ctxt.c2,
+                ciphertext_rand: combined_ctxt.c1,
+            };
+
+            // for genesis, let's expect all parties to behave correctly
+            // that said, this can be modified to just include the correct parties
+            assert!(verify(&statement, &message.proof));
+        }
+
         let mut incoming_shares: Vec<(NodeId<G>, ElGamalSecretKey<G>)> = Vec::new();
 
         // let's simulate the work of a receiver, which has to decrypt each dealer's message
@@ -415,8 +513,8 @@ mod tests {
 
         // let's remove one new node and rekey
         (candidate_addr_book, network_state) = GrothDKG::<G>::remove_node(
-            &addr_book[0].id, 
-            &addr_book, 
+            &addr_book[0].id,
+            &addr_book,
             &network_state
         );
 
