@@ -1,51 +1,9 @@
-use rand::{Rng, SeedableRng};
+use std::vec;
+
+use rand::SeedableRng;
 use ark_ff::Field;
-use ark_poly::{univariate::DensePolynomial, *};
-
-/// computes the Lagrange coefficient for the i-th point amongst the x-coordinates `xs`;
-/// The output coefficient is the result of evaluating the Lagrange polynomial at the point `x`.
-fn lagrange_coefficient<F: Field>(xs: &[F], i: usize, x: F) -> F {
-    // source: https://en.wikipedia.org/wiki/Lagrange_polynomial
-
-    // the ith point must be within the range of the x-coordinates
-    assert!(i < xs.len(), "index out of bounds");
-    //assert that the x-coordinates are distinct
-    assert_eq!(
-        xs.iter().collect::<std::collections::HashSet<_>>().len(),
-        xs.len(),
-        "x-coordinates must be distinct"
-    );
-
-    let xi = xs[i];
-    let mut numerator = F::one();
-    let mut denominator = F::one();
-    for (j, xj) in xs.iter().enumerate() {
-        if i != j {
-            numerator *= x - xj;
-            denominator *= xi - xj;
-        }
-    }
-    numerator * denominator.inverse().unwrap()
-}
-
-/// outputs a random polynomial with a fixed point at x = 0
-fn sample_random_polynomial_with_secret<F: Field, R: Rng>(
-    evaluation_at_0: F,
-    degree: usize,
-    rng: &mut R,
-) -> DensePolynomial<F> {
-    // A t degree polynomial is defined by t + 1 coefficients: a_0, a_1, ..., a_t
-    // such that p(x) = a_0 + a_1 * x + a_2 * x^2 + ... + a_t * x^t
-
-    let mut coefficients = Vec::new();
-
-    coefficients.push(evaluation_at_0); // a_0 is the evaluation at 0
-    for _ in 0..degree { //
-        coefficients.push(F::rand(rng)); // a_i is random coefficient
-    }
-    
-    DensePolynomial { coeffs: coefficients }
-}
+use ark_poly::{Polynomial, univariate::DensePolynomial};
+use crate::lagrange::*;
 
 /// outputs a (t,n) Shamir secret sharing of the input secret, 
 /// where t is the threshold and n is the number of shares.
@@ -56,7 +14,7 @@ pub fn share<F: Field>(
     secret: F,
     threshold: usize,
     share_ids: &[F],
-) -> Vec<(F, F)> {
+) -> (Vec<(F, F)>, DensePolynomial<F>) {
     // assert that the share_ids are distinct and non-zero
     assert_eq!(
         share_ids.iter().collect::<std::collections::HashSet<_>>().len(),
@@ -71,16 +29,24 @@ pub fn share<F: Field>(
     // generate random x-coordinates
     let mut rng = rand_chacha::ChaCha8Rng::from_seed([0u8; 32]);
 
-    let p = sample_random_polynomial_with_secret(
-        secret, threshold - 1, &mut rng
-    );
+    // lets sample a random polynomial with a fixed point at x = 0
+    // A t degree polynomial is defined by t + 1 coefficients: a_0, a_1, ..., a_t
+    // such that p(x) = a_0 + a_1 * x + a_2 * x^2 + ... + a_t * x^t
+    // here we want t = threshold - 1, so we have threshold number of coefficients
+    let p = DensePolynomial { coeffs: {
+        let mut coefficients = vec![secret]; // the secret is embedded at x = 0
+        (1..threshold).for_each(|_| coefficients.push(F::rand(&mut rng)));
+        coefficients
+    }};
 
     // we skip over 0 because that's where the secret is embedded
     let xs = share_ids.to_vec();
     let ys = xs.iter().map(|x| p.evaluate(x)).collect::<Vec<F>>();
 
     // output is a vector of (x,y) coordinate pairs
-    xs.iter().zip(ys.iter()).map(|(x, y)| (*x, *y)).collect()
+    let shares = xs.iter().zip(ys.iter()).map(|(x, y)| (*x, *y)).collect();
+
+    (shares, p)
 }
 
 /// recovers the secret given a subset of t shares,
@@ -123,7 +89,7 @@ mod tests {
         let num_shares = 5;
 
         let share_ids = (1..=num_shares).map(F::from).collect::<Vec<F>>();
-        let shares = share(secret, threshold, &share_ids[..]);
+        let shares = share(secret, threshold, &share_ids[..]).0;
 
         assert_eq!(secret, recover(&shares[..threshold]));
         assert_eq!(secret, recover(&shares[1..4]));
@@ -141,7 +107,7 @@ mod tests {
 
         // this is the first layer of shares
         let share_ids = (1..=num_parties).map(F::from).collect::<Vec<F>>();
-        let shares: Vec<(F,F)> = share(secret, threshold, &share_ids);
+        let shares: Vec<(F,F)> = share(secret, threshold, &share_ids).0;
 
         // this contains the shares of shares, indexed by the receiver id
         let mut incoming_shares: HashMap<F, Vec<(F,F)>> = HashMap::new();
@@ -149,7 +115,7 @@ mod tests {
         // each shareholder becomes a dealer in the next layer of shares
         for (dealer_id, share_value) in shares {
 
-            let shares_of_shares = share(share_value, threshold, &share_ids);
+            let shares_of_shares = share(share_value, threshold, &share_ids).0;
 
             for (receiver_id, share_of_share_value) in shares_of_shares {
                 incoming_shares.entry(receiver_id).or_insert(Vec::new()).push((dealer_id, share_of_share_value));

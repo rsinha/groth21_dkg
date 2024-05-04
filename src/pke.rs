@@ -1,5 +1,6 @@
 use ark_ec::*;
 use ark_ff::*;
+use ark_std::iterable::Iterable;
 use ark_std::marker::PhantomData;
 use ark_std::ops::*;
 use ark_serialize::*;
@@ -25,6 +26,11 @@ pub struct ElGamalChunkedCiphertextMulti<G: CurveGroup> {
     pub c1: Vec<G::Affine>,
     /// contains ciphertexts for each receiver, indexed first by the receiver and then by the chunk
     pub c2: Vec<Vec<G::Affine>>,
+}
+
+pub struct ElGamalCombinedCiphertextMulti<G: CurveGroup> {
+    pub c1: G::Affine,
+    pub c2: Vec<G::Affine>,
 }
 
 pub type ElGamalCache<G> = HashMap<<G as CurveGroup>::Affine, ElGamalMessage<G>>;
@@ -166,6 +172,32 @@ impl<G> ElGamal<G>
         }
 
         msg
+    }
+
+    pub fn combine_chunked_ciphertext(
+        ctxt: &ElGamalChunkedCiphertextMulti<G>
+    ) -> ElGamalCombinedCiphertextMulti<G> {
+        let c1 = ctxt.c1
+            .iter().enumerate().fold(
+                G::Affine::zero(), 
+                |acc, (j, c1_j)| 
+                    acc.add(c1_j.mul(&G::ScalarField::from(256u64).pow([j as u64])).into_affine())
+                .into_affine()
+            );
+
+        let mut c2 = Vec::new();
+        for receiver_i_ctxt in ctxt.c2.iter() {
+            let c2_i = receiver_i_ctxt
+                .iter().enumerate().fold(
+                    G::Affine::zero(), 
+                    |acc, (j, c2_ij)| 
+                        acc.add(c2_ij.mul(&G::ScalarField::from(256u64).pow([j as u64])).into_affine())
+                    .into_affine()
+                );
+            c2.push(c2_i);
+        }
+
+        ElGamalCombinedCiphertextMulti { c1, c2 }
     }
 
     /// recovers the message from the commitment by brute force;

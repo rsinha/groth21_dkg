@@ -66,7 +66,7 @@ impl<G> GrothDKG<G>
             // each dealer will choose its own entropy
             let entropy = BlsSecretKey::<G>::rand(rng);
             // ... and will secret-share it with the other nodes
-            let shares = share(entropy, t, &ids);
+            let shares = share(entropy, t, &ids).0;
 
             // arrange share values (the y-coordinate) by the node ids above
             let shares_y = ids.iter().map(|id| {
@@ -219,7 +219,7 @@ impl<G> GrothDKG<G>
                 .unwrap();
 
             // ... and will secret-share it with the other nodes
-            let shares = share(bls_secret, next_t, &next_ids);
+            let shares = share(bls_secret, next_t, &next_ids).0;
 
             // arrange share values (the y-coordinate) by the node ids above
             let shares_y = next_ids.iter().map(|id| {
