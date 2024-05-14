@@ -129,6 +129,16 @@ impl<G> GrothDKG<G>
         let mut genesis_addr_book = AddrBook::<G>::new();
         let cache = ElGamal::<G>::generate_cache();
 
+        let valid_dkg_messages: Vec<&DKGMessage<G>> = dkg_messages
+            .iter()
+            .filter(|msg| Self::verify_rekey_message(
+                msg,
+                &pks,
+                &ids,
+                &self.candidate_addr_book.iter().find(|entry| entry.id == msg.dealer_id).unwrap().commitment)
+            )
+            .collect();
+
         for (receiver_index, receiver_id) in ids.iter().enumerate() {
             // find receiver state in the network state data structure
             let receiver_state = self.state
@@ -139,9 +149,7 @@ impl<G> GrothDKG<G>
             let new_bls_secret_key = Self::process_setup_messages(
                 receiver_index as u64,
                 &receiver_state.elgamal_secret_key,
-                &dkg_messages,
-                &pks,
-                &ids,
+                &valid_dkg_messages,
                 &cache
             );
             
@@ -173,26 +181,9 @@ impl<G> GrothDKG<G>
     fn process_setup_messages(
         receiver_index: u64,
         elgamal_secret_key: &ElGamalSecretKey<G>,
-        messages: &Vec<DKGMessage<G>>,
-        pks: &Vec<ElGamalPublicKey<G>>,
-        ids: &Vec<NodeId<G>>,
+        messages: &Vec<&DKGMessage<G>>,
         cache: &ElGamalCache<G>
     ) -> BlsSecretKey<G> {
-        //let's verify the messages first
-        for message in messages.iter() {
-            let combined_ctxt = ElGamal::<G>::combine_chunked_ciphertext(&message.ctxt);
-            let statement: nizk::Statement<G> = nizk::Statement {
-                ids: ids.clone(),
-                public_keys: pks.clone(),
-                polynomial_commitment: message.commitment.clone(),
-                ciphertext_values: combined_ctxt.c2,
-                ciphertext_rand: combined_ctxt.c1,
-            };
-
-            // for genesis, let's expect all parties to behave correctly
-            // that said, this can be modified to just include the correct parties
-            assert!(verify(&statement, &message.proof));
-        }
 
         messages.iter().fold(BlsSecretKey::<G>::zero(), |acc, message| {
             let share_y = ElGamal::<G>::chunked_decrypt_multi_receiver(
@@ -327,6 +318,16 @@ impl<G> GrothDKG<G>
 
         let cache = ElGamal::<G>::generate_cache();
 
+        let valid_dkg_messages: Vec<&DKGMessage<G>> = dkg_messages
+            .iter()
+            .filter(|msg| Self::verify_rekey_message(
+                msg,
+                &next_pks,
+                &next_ids,
+                &self.addr_book.iter().find(|entry| entry.id == msg.dealer_id).unwrap().commitment)
+            )
+            .collect();
+
         for (receiver_index, receiver_id) in next_ids.iter().enumerate() {
             // find receiver state in the network state data structure
             let receiver_state = self.state
@@ -338,9 +339,7 @@ impl<G> GrothDKG<G>
             let new_bls_secret_key = Self::process_rekey_messages(
                 receiver_index as u64,
                 &receiver_state.elgamal_secret_key,
-                &dkg_messages,
-                &next_pks,
-                &next_ids,
+                &valid_dkg_messages,
                 &cache
             );
             println!("computation requirement per node: {:?}", rekey_compute_time.elapsed());
@@ -371,31 +370,42 @@ impl<G> GrothDKG<G>
         self.candidate_addr_book = next_addr_book.clone();
     }
 
+    fn verify_rekey_message(
+        message: &DKGMessage<G>,
+        pks: &Vec<ElGamalPublicKey<G>>,
+        ids: &Vec<NodeId<G>>,
+        share_public_key: &Option<BlsPublicKey<G>>
+    ) -> bool {
+        // does the polynomial commitment match up with the previous public key?
+        if let Some(expected_commitment) = *share_public_key {
+            let broadcasted_commitment = message.commitment[0];
+            if broadcasted_commitment != expected_commitment {
+                return false;
+            }
+        }
+
+        // verify the NIZK proof
+        let combined_ctxt = ElGamal::<G>::combine_chunked_ciphertext(&message.ctxt);
+        let statement: nizk::Statement<G> = nizk::Statement {
+            ids: ids.clone(),
+            public_keys: pks.clone(),
+            polynomial_commitment: message.commitment.clone(),
+            ciphertext_values: combined_ctxt.c2,
+            ciphertext_rand: combined_ctxt.c1,
+        };
+        if !verify(&statement, &message.proof) {
+            return false;
+        }
+
+        return true;
+    }
 
     fn process_rekey_messages(
         receiver_index: u64,
         elgamal_secret_key: &ElGamalSecretKey<G>,
-        dkg_messages: &Vec<DKGMessage<G>>,
-        pks: &Vec<ElGamalPublicKey<G>>,
-        ids: &Vec<NodeId<G>>,
+        dkg_messages: &Vec<&DKGMessage<G>>,
         cache: &ElGamalCache<G>,
     ) -> BlsSecretKey<G> {
-
-        //let's verify the messages first
-        for message in dkg_messages.iter() {
-            let combined_ctxt = ElGamal::<G>::combine_chunked_ciphertext(&message.ctxt);
-            let statement: nizk::Statement<G> = nizk::Statement {
-                ids: ids.clone(),
-                public_keys: pks.clone(),
-                polynomial_commitment: message.commitment.clone(),
-                ciphertext_values: combined_ctxt.c2,
-                ciphertext_rand: combined_ctxt.c1,
-            };
-
-            // for genesis, let's expect all parties to behave correctly
-            // that said, this can be modified to just include the correct parties
-            assert!(verify(&statement, &message.proof));
-        }
 
         let mut incoming_shares: Vec<(NodeId<G>, ElGamalSecretKey<G>)> = Vec::new();
 
