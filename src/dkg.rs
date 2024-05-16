@@ -13,14 +13,17 @@ use crate::nizk::*;
 
 /// message sent by a node during the setup or rekey protocol
 pub struct DKGMessage<G: CurveGroup> {
-    pub dealer_id: NodeId<G>,
+    pub dealer_id: ShareId<G>,
     pub ctxt: ElGamalChunkedCiphertextMulti<G>,
     pub commitment: Vec<G::Affine>,
     pub proof: Proof<G>,
 }
 
 /// the id this node will use for identifying shares
-pub type NodeId<G> = <<G as CurveGroup>::Config as CurveConfig>::ScalarField;
+pub type NodeId = u64;
+
+/// the id this node will use for identifying shares
+pub type ShareId<G> = <<G as CurveGroup>::Config as CurveConfig>::ScalarField;
 
 /// field element encoding the BLS secret key (or its share)
 pub type BlsSecretKey<G> = <<G as CurveGroup>::Config as CurveConfig>::ScalarField;
@@ -30,21 +33,22 @@ pub type BlsPublicKey<G> = <G as CurveGroup>::Affine;
 
 #[derive(Clone)]
 pub struct AddrBookEntry<G: CurveGroup> {
-    pub id: NodeId<G>, // unique id for the node
-    pub pk: ElGamalPublicKey<G>, // ElGamal public key
-    pub commitment: Option<BlsPublicKey<G>>, // commitment to the BLS key share
+    pub share_id: ShareId<G>, // unique id for the node
+    pub elgamal_public_key: ElGamalPublicKey<G>, // ElGamal public key
+    pub bls_public_key: Option<BlsPublicKey<G>>, // commitment to the BLS key share
 }
 
 pub type AddrBook<G> = Vec<AddrBookEntry<G>>;
 
 #[derive(Clone)]
-pub struct NodeState<G: CurveGroup> {
-    pub id: NodeId<G>,
+pub struct ShareState<G: CurveGroup> {
+    pub id: ShareId<G>,
     pub elgamal_secret_key: ElGamalSecretKey<G>,
     pub bls_secret_key: Option<BlsSecretKey<G>>,
 }
 
-pub type NetworkState<G> = Vec<NodeState<G>>;
+// only used for simulation purposes, real protocol does not have this!
+pub type NetworkState<G> = Vec<ShareState<G>>;
 
 pub struct GrothDKG<G: CurveGroup> {
     _engine: PhantomData<G>,
@@ -70,9 +74,9 @@ impl<G> GrothDKG<G>
         let t = n / 2 + 1;
         
         // all node ids as field elements
-        let ids = self.candidate_addr_book.iter().map(|entry| entry.id).collect::<Vec<NodeId<G>>>();
+        let ids = self.candidate_addr_book.iter().map(|entry| entry.share_id).collect::<Vec<ShareId<G>>>();
         // all public keys, arranged by the above ids
-        let pks = self.candidate_addr_book.iter().map(|entry| entry.pk).collect::<Vec<ElGamalPublicKey<G>>>();
+        let pks = self.candidate_addr_book.iter().map(|entry| entry.elgamal_public_key).collect::<Vec<ElGamalPublicKey<G>>>();
 
         let mut dkg_messages = Vec::new();
         // let's simulate the work of all dealers
@@ -119,7 +123,7 @@ impl<G> GrothDKG<G>
             dkg_messages.push(
                 DKGMessage {
                     ctxt: ctxt,
-                    dealer_id: dealer_entry.id.clone(),
+                    dealer_id: dealer_entry.share_id.clone(),
                     proof: prove(&witness, &statement, rng),
                     commitment: poly_commitment.clone(),
                 }
@@ -137,7 +141,7 @@ impl<G> GrothDKG<G>
                 msg,
                 &pks,
                 &ids,
-                &self.candidate_addr_book.iter().find(|entry| entry.id == msg.dealer_id).unwrap().commitment)
+                &self.candidate_addr_book.iter().find(|entry| entry.share_id == msg.dealer_id).unwrap().bls_public_key)
             )
             .collect();
 
@@ -160,16 +164,16 @@ impl<G> GrothDKG<G>
             let new_bls_public_key = Self::compute_share_public_key_setup(&valid_dkg_messages, receiver_id);
             assert!(new_bls_public_key == G::generator().mul(&new_bls_secret_key).into_affine());
 
-            let new_state = NodeState {
+            let new_state = ShareState {
                 id: *receiver_id,
                 elgamal_secret_key: receiver_state.elgamal_secret_key.clone(),
                 bls_secret_key: Some(new_bls_secret_key),
             };
 
             let new_addr_book_entry = AddrBookEntry {
-                id: *receiver_id,
-                pk: self.candidate_addr_book.iter().find(|entry| entry.id == *receiver_id).unwrap().pk,
-                commitment: Some(new_bls_public_key),
+                share_id: *receiver_id,
+                elgamal_public_key: self.candidate_addr_book.iter().find(|entry| entry.share_id == *receiver_id).unwrap().elgamal_public_key,
+                bls_public_key: Some(new_bls_public_key),
             };
 
             genesis_network_state.push(new_state);
@@ -207,31 +211,31 @@ impl<G> GrothDKG<G>
         // let's give this node a brand new id, which is 1 more than the maximum id in the address book
         let max_existing_id = self.candidate_addr_book
             .iter()
-            .map(|entry| entry.id)
+            .map(|entry| entry.share_id)
             .max()
-            .unwrap_or(NodeId::<G>::zero());
+            .unwrap_or(ShareId::<G>::zero());
 
-        let node_id = max_existing_id + NodeId::<G>::one();
+        let node_id = max_existing_id + ShareId::<G>::one();
 
         // we only touch the candidate addr_book
         self.candidate_addr_book.push(AddrBookEntry {
-            id: node_id.clone(),
-            pk: elgamal_public_key,
-            commitment: None,
+            share_id: node_id.clone(),
+            elgamal_public_key: elgamal_public_key,
+            bls_public_key: None,
         });
         
-        self.state.push(NodeState {
+        self.state.push(ShareState {
             id: node_id.clone(),
             elgamal_secret_key: elgamal_secret_key.clone(),
             bls_secret_key: None,
         });
     }
 
-    pub fn remove_node(&mut self, node_id: &NodeId<G>) {
+    pub fn remove_node(&mut self, node_id: &ShareId<G>) {
         // collect all entries that are not the node_id to be removed
         let all_but_nodeid_addr_book = self.candidate_addr_book
             .iter()
-            .filter(|entry| entry.id != *node_id)
+            .filter(|entry| entry.share_id != *node_id)
             .cloned()
             .collect::<AddrBook<G>>();
 
@@ -245,9 +249,9 @@ impl<G> GrothDKG<G>
         let next_t = next_n / 2 + 1;
         
         // all node ids as field elements
-        let next_ids = self.candidate_addr_book.iter().map(|entry| entry.id).collect::<Vec<NodeId<G>>>();
+        let next_ids = self.candidate_addr_book.iter().map(|entry| entry.share_id).collect::<Vec<ShareId<G>>>();
         // all public keys, arranged by the above ids
-        let next_pks = self.candidate_addr_book.iter().map(|entry| entry.pk).collect::<Vec<ElGamalPublicKey<G>>>();
+        let next_pks = self.candidate_addr_book.iter().map(|entry| entry.elgamal_public_key).collect::<Vec<ElGamalPublicKey<G>>>();
 
         let mut dkg_messages = Vec::new();
 
@@ -257,7 +261,7 @@ impl<G> GrothDKG<G>
             // each dealer will secret-share its bls secret key
             let bls_secret = self.state
                 .iter()
-                .find(|state| state.id == dealer_entry.id)
+                .find(|state| state.id == dealer_entry.share_id)
                 .unwrap()
                 .bls_secret_key
                 .unwrap();
@@ -302,7 +306,7 @@ impl<G> GrothDKG<G>
             dkg_messages.push(
                 DKGMessage {
                     ctxt: ctxt,
-                    dealer_id: dealer_entry.id.clone(),
+                    dealer_id: dealer_entry.share_id.clone(),
                     proof: prove(&witness, &statement, rng),
                     commitment: poly_commitment.clone(),
                 }
@@ -329,7 +333,7 @@ impl<G> GrothDKG<G>
                 msg,
                 &next_pks,
                 &next_ids,
-                &self.addr_book.iter().find(|entry| entry.id == msg.dealer_id).unwrap().commitment)
+                &self.addr_book.iter().find(|entry| entry.share_id == msg.dealer_id).unwrap().bls_public_key)
             )
             .collect();
         println!("valid dkg messages: {:?}", valid_dkg_messages.len());
@@ -354,16 +358,16 @@ impl<G> GrothDKG<G>
 
             println!("computation requirement per node: {:?}", rekey_compute_time.elapsed());
 
-            let new_state = NodeState {
+            let new_state = ShareState {
                 id: *receiver_id,
                 elgamal_secret_key: receiver_state.elgamal_secret_key.clone(),
                 bls_secret_key: Some(new_bls_secret_key),
             };
 
             let new_addr_book_entry = AddrBookEntry {
-                id: *receiver_id,
-                pk: self.candidate_addr_book.iter().find(|entry| entry.id == *receiver_id).unwrap().pk,
-                commitment: Some(new_bls_public_key),
+                share_id: *receiver_id,
+                elgamal_public_key: self.candidate_addr_book.iter().find(|entry| entry.share_id == *receiver_id).unwrap().elgamal_public_key,
+                bls_public_key: Some(new_bls_public_key),
             };
 
             next_network_state.push(new_state);
@@ -380,7 +384,7 @@ impl<G> GrothDKG<G>
     fn verify_dkg_message(
         message: &DKGMessage<G>,
         pks: &Vec<ElGamalPublicKey<G>>,
-        ids: &Vec<NodeId<G>>,
+        ids: &Vec<ShareId<G>>,
         share_public_key: &Option<BlsPublicKey<G>>
     ) -> bool {
         // does the polynomial commitment match up with the previous public key?
@@ -414,7 +418,7 @@ impl<G> GrothDKG<G>
         cache: &ElGamalCache<G>,
     ) -> BlsSecretKey<G> {
 
-        let mut incoming_shares: Vec<(NodeId<G>, ElGamalSecretKey<G>)> = Vec::new();
+        let mut incoming_shares: Vec<(ShareId<G>, ElGamalSecretKey<G>)> = Vec::new();
 
         // let's simulate the work of a receiver, which has to decrypt each dealer's message
         for dkg_message in dkg_messages.iter() {
@@ -433,14 +437,14 @@ impl<G> GrothDKG<G>
 
     pub fn compute_share_public_key_setup(
         dkg_messages: &Vec<&DKGMessage<G>>,
-        share_id: &NodeId<G>
+        share_id: &ShareId<G>
     ) -> BlsPublicKey<G> {
 
         let mut dealt_share_pubkeys = Vec::new();
 
         for msg in dkg_messages.iter() {
             // compute powers of share_id
-            let xs = (0..msg.commitment.len()).map(|i| share_id.pow([i as u64])).collect::<Vec<NodeId<G>>>();
+            let xs = (0..msg.commitment.len()).map(|i| share_id.pow([i as u64])).collect::<Vec<ShareId<G>>>();
             let share_of_share_pubkey = msg.commitment.iter().zip(xs.iter()).fold(G::zero(), |acc, (&a_i, &x_i)| { acc + a_i.mul(x_i) });
             dealt_share_pubkeys.push(share_of_share_pubkey);
         }
@@ -452,7 +456,7 @@ impl<G> GrothDKG<G>
 
     pub fn compute_share_public_key_rekey(
         dkg_messages: &Vec<&DKGMessage<G>>,
-        share_id: &NodeId<G>
+        share_id: &ShareId<G>
     ) -> BlsPublicKey<G> {
 
         let mut dealt_share_pubkeys = Vec::new();
@@ -460,7 +464,7 @@ impl<G> GrothDKG<G>
 
         for msg in dkg_messages.iter() {
             // compute powers of share_id
-            let xs = (0..msg.commitment.len()).map(|i| share_id.pow([i as u64])).collect::<Vec<NodeId<G>>>();
+            let xs = (0..msg.commitment.len()).map(|i| share_id.pow([i as u64])).collect::<Vec<ShareId<G>>>();
 
             let share_of_share_pubkey = msg.commitment.iter().zip(xs.iter()).fold(G::zero(), |acc, (&a_i, &x_i)| { acc + a_i.mul(x_i) });
 
@@ -468,7 +472,7 @@ impl<G> GrothDKG<G>
             dealer_ids.push(msg.dealer_id);
         }
 
-        let λs: Vec<NodeId<G>> = (0..dealer_ids.len()).map(|i| { lagrange_coefficient(&dealer_ids, i, NodeId::<G>::zero()) }).collect();
+        let λs: Vec<ShareId<G>> = (0..dealer_ids.len()).map(|i| { lagrange_coefficient(&dealer_ids, i, ShareId::<G>::zero()) }).collect();
 
         let public_key = λs.iter().zip(dealt_share_pubkeys.iter())
             .fold(G::zero(), |acc, (&λ_i, &y_i)| { acc + y_i.mul(λ_i) });
@@ -478,11 +482,11 @@ impl<G> GrothDKG<G>
 
     pub fn compute_ledger_id(&self) -> BlsPublicKey<G> {
         // all node ids as field elements
-        let ids = self.addr_book.iter().map(|entry| entry.id).collect::<Vec<NodeId<G>>>();
+        let ids = self.addr_book.iter().map(|entry| entry.share_id).collect::<Vec<ShareId<G>>>();
         // all public keys, arranged by the above ids
-        let pks = self.addr_book.iter().map(|entry| entry.commitment.unwrap()).collect::<Vec<BlsPublicKey<G>>>();
+        let pks = self.addr_book.iter().map(|entry| entry.bls_public_key.unwrap()).collect::<Vec<BlsPublicKey<G>>>();
 
-        let λs: Vec<NodeId<G>> = (0..ids.len()).map(|i| { lagrange_coefficient(&ids, i, NodeId::<G>::zero()) }).collect();
+        let λs: Vec<ShareId<G>> = (0..ids.len()).map(|i| { lagrange_coefficient(&ids, i, ShareId::<G>::zero()) }).collect();
 
         let public_key = λs.iter().zip(pks.iter())
             .fold(G::zero(), |acc, (&λ_i, &pk_i)| { acc + pk_i.mul(λ_i) });
@@ -503,7 +507,7 @@ mod tests {
 
     fn simulate_bls_secret_recovery(network_state: &NetworkState<G>) -> BlsSecretKey<G> {
 
-        let shares: Vec<(NodeId<G>, BlsSecretKey<G>)> = network_state
+        let shares: Vec<(ShareId<G>, BlsSecretKey<G>)> = network_state
             .iter()
             .filter(|state| state.bls_secret_key.is_some())
             .map(|node_state| { (node_state.id.clone(), node_state.bls_secret_key.unwrap())})
@@ -559,7 +563,7 @@ mod tests {
         assert_eq!(ledger_id, network.compute_ledger_id());
 
         // let's remove a node (say node 0) and rekey
-        let id_to_be_removed = network.addr_book[0].id;
+        let id_to_be_removed = network.addr_book[0].share_id;
         network.remove_node(&id_to_be_removed);
 
         network.rekey(rng);
