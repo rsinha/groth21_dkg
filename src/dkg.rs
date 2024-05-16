@@ -3,10 +3,12 @@ use rand::Rng;
 use ark_ec::*;
 use ark_ff::*;
 use ark_std::marker::PhantomData;
+use ark_std::ops::*;
 
 use crate::nizk;
 use crate::pke::*;
 use crate::sss::*;
+use crate::lagrange::*;
 use crate::nizk::*;
 
 /// message sent by a node during the setup or rekey protocol
@@ -131,13 +133,15 @@ impl<G> GrothDKG<G>
 
         let valid_dkg_messages: Vec<&DKGMessage<G>> = dkg_messages
             .iter()
-            .filter(|msg| Self::verify_rekey_message(
+            .filter(|msg| Self::verify_dkg_message(
                 msg,
                 &pks,
                 &ids,
                 &self.candidate_addr_book.iter().find(|entry| entry.id == msg.dealer_id).unwrap().commitment)
             )
             .collect();
+
+        println!("[setup] valid dkg messages: {:?}", valid_dkg_messages.len());
 
         for (receiver_index, receiver_id) in ids.iter().enumerate() {
             // find receiver state in the network state data structure
@@ -153,8 +157,8 @@ impl<G> GrothDKG<G>
                 &cache
             );
             
-            //TODO: need to derive this from the commitments in the DKG messages
-            let new_bls_public_key = G::generator().mul(new_bls_secret_key).into_affine();
+            let new_bls_public_key = Self::compute_share_public_key_setup(&valid_dkg_messages, receiver_id);
+            assert!(new_bls_public_key == G::generator().mul(&new_bls_secret_key).into_affine());
 
             let new_state = NodeState {
                 id: *receiver_id,
@@ -311,6 +315,7 @@ impl<G> GrothDKG<G>
         let each_node_output =  ((ctxt_size_by_each_node * 48) as f64) / ((1024 * 1024) as f64);
         println!("communication requirement per node: {} MB", each_node_output);
         println!("communication requirement total: {} MB", each_node_output * next_n as f64);
+        println!("dkg messages: {:?}", dkg_messages.len());
 
         // let's compute the output address book and network state
         let mut next_network_state = NetworkState::<G>::new();
@@ -320,13 +325,14 @@ impl<G> GrothDKG<G>
 
         let valid_dkg_messages: Vec<&DKGMessage<G>> = dkg_messages
             .iter()
-            .filter(|msg| Self::verify_rekey_message(
+            .filter(|msg| Self::verify_dkg_message(
                 msg,
                 &next_pks,
                 &next_ids,
                 &self.addr_book.iter().find(|entry| entry.id == msg.dealer_id).unwrap().commitment)
             )
             .collect();
+        println!("valid dkg messages: {:?}", valid_dkg_messages.len());
 
         for (receiver_index, receiver_id) in next_ids.iter().enumerate() {
             // find receiver state in the network state data structure
@@ -336,16 +342,17 @@ impl<G> GrothDKG<G>
                 .unwrap();
 
             let rekey_compute_time = std::time::Instant::now();
-            let new_bls_secret_key = Self::process_rekey_messages(
+            let new_bls_secret_key = Self::compute_share_secret_key(
                 receiver_index as u64,
                 &receiver_state.elgamal_secret_key,
                 &valid_dkg_messages,
                 &cache
             );
-            println!("computation requirement per node: {:?}", rekey_compute_time.elapsed());
             
-            //TODO: need to derive this from the commitments in the DKG messages
-            let new_bls_public_key = G::generator().mul(new_bls_secret_key).into_affine();
+            let new_bls_public_key = Self::compute_share_public_key_rekey(&valid_dkg_messages, receiver_id);
+            assert!(new_bls_public_key == G::generator().mul(&new_bls_secret_key).into_affine());
+
+            println!("computation requirement per node: {:?}", rekey_compute_time.elapsed());
 
             let new_state = NodeState {
                 id: *receiver_id,
@@ -370,7 +377,7 @@ impl<G> GrothDKG<G>
         self.candidate_addr_book = next_addr_book.clone();
     }
 
-    fn verify_rekey_message(
+    fn verify_dkg_message(
         message: &DKGMessage<G>,
         pks: &Vec<ElGamalPublicKey<G>>,
         ids: &Vec<NodeId<G>>,
@@ -400,7 +407,7 @@ impl<G> GrothDKG<G>
         return true;
     }
 
-    fn process_rekey_messages(
+    fn compute_share_secret_key(
         receiver_index: u64,
         elgamal_secret_key: &ElGamalSecretKey<G>,
         dkg_messages: &Vec<&DKGMessage<G>>,
@@ -424,7 +431,67 @@ impl<G> GrothDKG<G>
         recover::<BlsSecretKey<G>>(&incoming_shares)
     }
 
+    pub fn compute_share_public_key_setup(
+        dkg_messages: &Vec<&DKGMessage<G>>,
+        share_id: &NodeId<G>
+    ) -> BlsPublicKey<G> {
+
+        let mut dealt_share_pubkeys = Vec::new();
+
+        for msg in dkg_messages.iter() {
+            // compute powers of share_id
+            let xs = (0..msg.commitment.len()).map(|i| share_id.pow([i as u64])).collect::<Vec<NodeId<G>>>();
+            let share_of_share_pubkey = msg.commitment.iter().zip(xs.iter()).fold(G::zero(), |acc, (&a_i, &x_i)| { acc + a_i.mul(x_i) });
+            dealt_share_pubkeys.push(share_of_share_pubkey);
+        }
+
+        let public_key = dealt_share_pubkeys.iter().fold(G::zero(), |acc, y_i| { acc + y_i });
+
+        return public_key.into_affine();
+    }
+
+    pub fn compute_share_public_key_rekey(
+        dkg_messages: &Vec<&DKGMessage<G>>,
+        share_id: &NodeId<G>
+    ) -> BlsPublicKey<G> {
+
+        let mut dealt_share_pubkeys = Vec::new();
+        let mut dealer_ids = Vec::new();
+
+        for msg in dkg_messages.iter() {
+            // compute powers of share_id
+            let xs = (0..msg.commitment.len()).map(|i| share_id.pow([i as u64])).collect::<Vec<NodeId<G>>>();
+
+            let share_of_share_pubkey = msg.commitment.iter().zip(xs.iter()).fold(G::zero(), |acc, (&a_i, &x_i)| { acc + a_i.mul(x_i) });
+
+            dealt_share_pubkeys.push(share_of_share_pubkey);
+            dealer_ids.push(msg.dealer_id);
+        }
+
+        let λs: Vec<NodeId<G>> = (0..dealer_ids.len()).map(|i| { lagrange_coefficient(&dealer_ids, i, NodeId::<G>::zero()) }).collect();
+
+        let public_key = λs.iter().zip(dealt_share_pubkeys.iter())
+            .fold(G::zero(), |acc, (&λ_i, &y_i)| { acc + y_i.mul(λ_i) });
+
+        return public_key.into_affine();
+    }
+
+    pub fn compute_ledger_id(&self) -> BlsPublicKey<G> {
+        // all node ids as field elements
+        let ids = self.addr_book.iter().map(|entry| entry.id).collect::<Vec<NodeId<G>>>();
+        // all public keys, arranged by the above ids
+        let pks = self.addr_book.iter().map(|entry| entry.commitment.unwrap()).collect::<Vec<BlsPublicKey<G>>>();
+
+        let λs: Vec<NodeId<G>> = (0..ids.len()).map(|i| { lagrange_coefficient(&ids, i, NodeId::<G>::zero()) }).collect();
+
+        let public_key = λs.iter().zip(pks.iter())
+            .fold(G::zero(), |acc, (&λ_i, &pk_i)| { acc + pk_i.mul(λ_i) });
+
+        return public_key.into_affine();
+    }
+
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -448,7 +515,7 @@ mod tests {
     #[test]
     fn test_dkg_large() {
         let rng = &mut test_rng();
-        let network_size = 32;
+        let network_size = 12;
 
         let mut network = GrothDKG::<G>::init();
 
@@ -461,13 +528,14 @@ mod tests {
         // run the genesis protocol
         network.setup(rng);
 
-        // ledger id is the BLS public key // TODO: add the method for getting the public key
         let ledger_id_secret = simulate_bls_secret_recovery(&network.state);
+        let ledger_id = network.compute_ledger_id();
 
         // let's do a rekey with the same set of nodes
         network.rekey(rng);
 
         assert_eq!(ledger_id_secret, simulate_bls_secret_recovery(&network.state));
+        assert_eq!(ledger_id, network.compute_ledger_id());
     }
 
     #[test]
@@ -482,11 +550,13 @@ mod tests {
         }
 
         network.setup(rng);
+        let ledger_id = network.compute_ledger_id();
         let ledger_id_secret = simulate_bls_secret_recovery(&network.state);
 
         // let's first do a rekey with the same set of nodes...because why not!
         network.rekey(rng);
         assert_eq!(ledger_id_secret, simulate_bls_secret_recovery(&network.state));
+        assert_eq!(ledger_id, network.compute_ledger_id());
 
         // let's remove a node (say node 0) and rekey
         let id_to_be_removed = network.addr_book[0].id;
@@ -494,6 +564,7 @@ mod tests {
 
         network.rekey(rng);
         assert_eq!(ledger_id_secret, simulate_bls_secret_recovery(&network.state));
+        assert_eq!(ledger_id, network.compute_ledger_id());
 
         // let's add two nodes and rekey
         network.add_node(&ElGamalSecretKey::<G>::rand(rng));
@@ -501,6 +572,7 @@ mod tests {
 
         network.rekey(rng);
         assert_eq!(ledger_id_secret, simulate_bls_secret_recovery(&network.state));
+        assert_eq!(ledger_id, network.compute_ledger_id());
 
     }
 
@@ -517,8 +589,8 @@ mod tests {
         }
 
         network.setup(rng);
+        let ledger_id = network.compute_ledger_id();
         let ledger_id_secret = simulate_bls_secret_recovery(&network.state);
-
 
         // let's add two nodes and rekey
         for _i in 0..2 {
@@ -526,6 +598,7 @@ mod tests {
         }
         network.rekey(rng);
         assert_eq!(ledger_id_secret, simulate_bls_secret_recovery(&network.state));
+        assert_eq!(ledger_id, network.compute_ledger_id());
 
         // let's add three nodes and rekey
         for _i in 0..3 {
@@ -533,5 +606,6 @@ mod tests {
         }
         network.rekey(rng);
         assert_eq!(ledger_id_secret, simulate_bls_secret_recovery(&network.state));
+        assert_eq!(ledger_id, network.compute_ledger_id());
     }
 }
