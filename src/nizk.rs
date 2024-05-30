@@ -1,8 +1,9 @@
 use ark_ec::*;
 use ark_ff::*;
 use ark_poly::univariate::DensePolynomial;
-use rand::Rng;
+use rand::{SeedableRng, Rng};
 use std::ops::*;
+use crate::utils;
 
 type ScalarField<G> = <<G as CurveGroup>::Config as CurveConfig>::ScalarField;
 
@@ -13,6 +14,33 @@ pub struct Statement<G: CurveGroup> {
     pub polynomial_commitment: Vec<G::Affine>, // t group elements // (A_0, ..., A_t-1) in the paper
     pub ciphertext_values: Vec<G::Affine>, // n ciphertexts // C1,...,Cn in the paper
     pub ciphertext_rand: G::Affine, // 1 group element // R in the paper
+}
+
+fn serialize_statement<G: CurveGroup>(statement: &Statement<G>) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for id in &statement.ids {
+        bytes.extend_from_slice(&utils::serialize_field_element(id));
+    }
+    for pk in &statement.public_keys {
+        bytes.extend_from_slice(&utils::serialize_group_element::<G>(pk));
+    }
+    for pc in &statement.polynomial_commitment {
+        bytes.extend_from_slice(&utils::serialize_group_element::<G>(pc));
+    }
+    for cv in &statement.ciphertext_values {
+        bytes.extend_from_slice(&utils::serialize_group_element::<G>(cv));
+    }
+    bytes.extend_from_slice(&utils::serialize_group_element::<G>(&statement.ciphertext_rand));
+    bytes
+}
+
+#[allow(non_snake_case)]
+fn serialize_transcript<G: CurveGroup>(F: &G::Affine, A: &G::Affine, Y: &G::Affine) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&utils::serialize_group_element::<G>(F));
+    bytes.extend_from_slice(&utils::serialize_group_element::<G>(A));
+    bytes.extend_from_slice(&utils::serialize_group_element::<G>(Y));
+    bytes
 }
 
 #[allow(non_snake_case)]
@@ -48,7 +76,11 @@ pub fn prove<G: CurveGroup, R: Rng>(
     rng: &mut R
 ) -> Proof<G> {
     // compute x := RO(instance)
-    let x = ScalarField::<G>::from(42u64); // obviously TODO
+    // we do this by seeding a PRNG with the SHA256 hash of the instance (serialized)
+    let mut ro_prng = rand_chacha::ChaCha8Rng::from_seed(
+        utils::compute_sha256(&serialize_statement(statement))
+    );
+    let x = ScalarField::<G>::rand(&mut ro_prng);
 
     // Generate random α, ρ ←$ Zp
     let alpha = ScalarField::<G>::rand(rng);
@@ -69,7 +101,10 @@ pub fn prove<G: CurveGroup, R: Rng>(
     let Y = inner.mul(rho).add(A).into_affine();
 
     // compute x' := RO(x, F, A, Y)
-    let x_prime = ScalarField::<G>::from(86u64); // obviously TODO
+    let mut ro_prng = rand_chacha::ChaCha8Rng::from_seed(
+        utils::compute_sha256(&serialize_transcript::<G>(&F, &A, &Y))
+    );
+    let x_prime = ScalarField::<G>::rand(&mut ro_prng);
 
     // compute z_r = x' * r + rho
     let z_r = x_prime * witness.rand + rho;
@@ -91,9 +126,17 @@ pub fn verify<G: CurveGroup>(
     proof: &Proof<G>
 ) -> bool {
     // compute x := RO(instance)
-    let x = ScalarField::<G>::from(42u64); // obviously TODO
+    // we do this by seeding a PRNG with the SHA256 hash of the instance (serialized)
+    let mut ro_prng = rand_chacha::ChaCha8Rng::from_seed(
+        utils::compute_sha256(&serialize_statement(statement))
+    );
+    let x = ScalarField::<G>::rand(&mut ro_prng);
+
     // compute x' := RO(x, F, A, Y)
-    let x_prime = ScalarField::<G>::from(86u64); // obviously TODO
+    let mut ro_prng = rand_chacha::ChaCha8Rng::from_seed(
+        utils::compute_sha256(&serialize_transcript::<G>(&proof.F, &proof.A, &proof.Y))
+    );
+    let x_prime = ScalarField::<G>::rand(&mut ro_prng);
     
     // check R ^ x' . F = g ^ z_r
     let lhs = statement.ciphertext_rand.mul(&x_prime).add(&proof.F).into_affine();
