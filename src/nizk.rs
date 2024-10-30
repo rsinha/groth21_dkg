@@ -35,8 +35,9 @@ fn serialize_statement<G: CurveGroup>(statement: &Statement<G>) -> Vec<u8> {
 }
 
 #[allow(non_snake_case)]
-fn serialize_transcript<G: CurveGroup>(F: &G::Affine, A: &G::Affine, Y: &G::Affine) -> Vec<u8> {
+fn serialize_transcript<G: CurveGroup>(x: &ScalarField<G>, F: &G::Affine, A: &G::Affine, Y: &G::Affine) -> Vec<u8> {
     let mut bytes = Vec::new();
+    bytes.extend_from_slice(&utils::serialize_field_element::<ScalarField<G>>(x));
     bytes.extend_from_slice(&utils::serialize_group_element::<G>(F));
     bytes.extend_from_slice(&utils::serialize_group_element::<G>(A));
     bytes.extend_from_slice(&utils::serialize_group_element::<G>(Y));
@@ -102,7 +103,7 @@ pub fn prove<G: CurveGroup, R: Rng>(
 
     // compute x' := RO(x, F, A, Y)
     let mut ro_prng = rand_chacha::ChaCha8Rng::from_seed(
-        utils::compute_sha256(&serialize_transcript::<G>(&F, &A, &Y))
+        utils::compute_sha256(&serialize_transcript::<G>(&x, &F, &A, &Y))
     );
     let x_prime = ScalarField::<G>::rand(&mut ro_prng);
 
@@ -134,7 +135,7 @@ pub fn verify<G: CurveGroup>(
 
     // compute x' := RO(x, F, A, Y)
     let mut ro_prng = rand_chacha::ChaCha8Rng::from_seed(
-        utils::compute_sha256(&serialize_transcript::<G>(&proof.F, &proof.A, &proof.Y))
+        utils::compute_sha256(&serialize_transcript::<G>(&x, &proof.F, &proof.A, &proof.Y))
     );
     let x_prime = ScalarField::<G>::rand(&mut ro_prng);
     
